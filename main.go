@@ -25,6 +25,7 @@ import (
 const (
 	ExtAliases     = "x-cli-aliases"
 	ExtDescription = "x-cli-description"
+	ExtGroup       = "x-cli-group"
 	ExtIgnore      = "x-cli-ignore"
 	ExtHidden      = "x-cli-hidden"
 	ExtName        = "x-cli-name"
@@ -57,6 +58,7 @@ type Operation struct {
 	CanHaveBody    bool
 	ReturnType     string
 	Path           string
+	Group          string
 	AllParams      []*Param
 	RequiredParams []*Param
 	OptionalParams []*Param
@@ -65,6 +67,14 @@ type Operation struct {
 	Hidden         bool
 	NeedsResponse  bool
 	Waiters        []*WaiterParams
+}
+
+// OperationGroup holds operations that share a resource group.
+type OperationGroup struct {
+	Name       string
+	GoName     string
+	Short      string
+	Operations []*Operation
 }
 
 // Waiter describes a special command that blocks until a condition has been
@@ -124,6 +134,7 @@ type OpenAPI struct {
 	Description  string
 	Servers      []*Server
 	Operations   []*Operation
+	Groups       []*OperationGroup
 	Waiters      []*Waiter
 }
 
@@ -163,6 +174,8 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 		keys = append(keys, path)
 	}
 	sort.Strings(keys)
+
+	collectionResources, multiParentResources := precomputeResources(keys)
 
 	for _, path := range keys {
 		item := api.Paths[path]
@@ -280,6 +293,16 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 				}
 			}
 
+			group, actionName := deriveGroupAndAction(path, strings.ToUpper(method), collectionResources, multiParentResources)
+			if operation.Extensions[ExtGroup] != nil {
+				group = extStr(operation.Extensions[ExtGroup])
+			}
+			if operation.Extensions[ExtName] != nil {
+				actionName = extStr(operation.Extensions[ExtName])
+			}
+
+			use = actionUsage(actionName, requiredParams)
+
 			o := &Operation{
 				HandlerName:    slug(name),
 				GoName:         toGoName(name, true),
@@ -291,6 +314,7 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 				CanHaveBody:    method == "Post" || method == "Put" || method == "Patch",
 				ReturnType:     returnType,
 				Path:           path,
+				Group:          group,
 				AllParams:      params,
 				RequiredParams: requiredParams,
 				OptionalParams: optionalParams,
@@ -387,6 +411,25 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 		}
 	}
 
+	// Build groups from operations
+	groupMap := make(map[string]*OperationGroup)
+	var groupOrder []string
+	for _, op := range result.Operations {
+		g := op.Group
+		if _, exists := groupMap[g]; !exists {
+			groupMap[g] = &OperationGroup{
+				Name:   g,
+				GoName: toGoName(g, true),
+				Short:  "Manage " + g,
+			}
+			groupOrder = append(groupOrder, g)
+		}
+		groupMap[g].Operations = append(groupMap[g].Operations, op)
+	}
+	for _, name := range groupOrder {
+		result.Groups = append(result.Groups, groupMap[name])
+	}
+
 	return result
 }
 
@@ -419,6 +462,136 @@ func escapeString(value string) string {
 	return transformed
 }
 
+func isPathParam(s string) bool {
+	return strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")
+}
+
+func cleanPathParts(urlPath string) []string {
+	parts := strings.Split(strings.Trim(urlPath, "/"), "/")
+	if len(parts) > 0 && len(parts[0]) >= 2 && parts[0][0] == 'v' && parts[0][1] >= '0' && parts[0][1] <= '9' {
+		parts = parts[1:]
+	}
+	return parts
+}
+
+// precomputeResources analyzes all API paths to determine which segments are
+// collection resources and which appear under multiple parents.
+func precomputeResources(paths []string) (collectionResources, multiParentResources map[string]bool) {
+	collectionResources = map[string]bool{}
+	parentMap := map[string]map[string]bool{}
+
+	for _, p := range paths {
+		parts := cleanPathParts(p)
+		var lastCollection string
+		for i := 0; i < len(parts); i++ {
+			seg := parts[i]
+			if isPathParam(seg) {
+				continue
+			}
+			if i+1 < len(parts) && isPathParam(parts[i+1]) {
+				collectionResources[seg] = true
+				if lastCollection != "" && seg != lastCollection {
+					if parentMap[seg] == nil {
+						parentMap[seg] = map[string]bool{}
+					}
+					parentMap[seg][lastCollection] = true
+				}
+				lastCollection = seg
+			}
+		}
+	}
+
+	multiParentResources = map[string]bool{}
+	for res, parents := range parentMap {
+		if len(parents) > 1 {
+			multiParentResources[res] = true
+		}
+	}
+	return
+}
+
+func deriveGroupAndAction(urlPath, httpMethod string, collectionResources, multiParentResources map[string]bool) (group, action string) {
+	parts := cleanPathParts(urlPath)
+
+	if len(parts) == 0 {
+		return "api", methodToAction(httpMethod, false)
+	}
+
+	// Find the deepest qualifying collection resource (not multi-parent)
+	groupIdx := -1
+	for i := 0; i < len(parts); i++ {
+		seg := parts[i]
+		if isPathParam(seg) {
+			continue
+		}
+		if collectionResources[seg] && !multiParentResources[seg] {
+			groupIdx = i
+			group = seg
+		}
+	}
+
+	if groupIdx < 0 {
+		group = parts[0]
+		groupIdx = 0
+	}
+
+	// Collect action parts: non-param segments after the group and its param
+	afterIdx := groupIdx + 1
+	if afterIdx < len(parts) && isPathParam(parts[afterIdx]) {
+		afterIdx++
+	}
+
+	var actionParts []string
+	for i := afterIdx; i < len(parts); i++ {
+		if !isPathParam(parts[i]) {
+			actionParts = append(actionParts, parts[i])
+		}
+	}
+
+	lastIsParam := isPathParam(parts[len(parts)-1])
+
+	if len(actionParts) > 0 {
+		action = strings.Join(actionParts, "-")
+		if lastIsParam && len(actionParts) == 1 {
+			action = depluralize(actionParts[0])
+		}
+	} else {
+		action = methodToAction(httpMethod, lastIsParam)
+	}
+
+	return
+}
+
+func methodToAction(method string, singleResource bool) string {
+	switch strings.ToUpper(method) {
+	case "GET":
+		if singleResource {
+			return "get"
+		}
+		return "list"
+	case "POST":
+		return "create"
+	case "PATCH", "PUT":
+		return "update"
+	case "DELETE":
+		return "delete"
+	}
+	return strings.ToLower(method)
+}
+
+func depluralize(s string) string {
+	if strings.HasSuffix(s, "ies") {
+		return s[:len(s)-3] + "y"
+	}
+	if strings.HasSuffix(s, "ses") || strings.HasSuffix(s, "xes") || strings.HasSuffix(s, "zes") {
+		return s[:len(s)-2]
+	}
+	if strings.HasSuffix(s, "s") && !strings.HasSuffix(s, "ss") && !strings.HasSuffix(s, "us") {
+		return s[:len(s)-1]
+	}
+	return s
+}
+
 func slug(operationID string) string {
 	transformed := strings.ToLower(operationID)
 	transformed = strings.Replace(transformed, "_", "-", -1)
@@ -434,6 +607,16 @@ func usage(name string, requiredParams []*Param) string {
 	}
 
 	return usage
+}
+
+func actionUsage(action string, requiredParams []*Param) string {
+	u := slug(action)
+
+	for _, p := range requiredParams {
+		u += " " + slug(p.Name)
+	}
+
+	return u
 }
 
 func getParams(path *openapi3.PathItem, httpMethod string) []*Param {

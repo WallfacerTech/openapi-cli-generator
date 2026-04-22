@@ -224,91 +224,101 @@ func {{ $api }}Register(subcommand bool) {
 		{{ end }}
 	{{ end }}
 
-	{{ range $operation := .Operations }}
+	{{ range $group := .Groups }}
 		func () {
-			params := viper.New()
-
-			var examples string
-
-			{{ range $ex := .Examples }}
-				examples += "  " + cli.Root.CommandPath() + " {{ $operation.Use }} {{ $ex }}\n"
-			{{ end }}
-
-			cmd := &cobra.Command{
-				Use: "{{ .Use }}",
-				{{- if .Aliases }}
-					Aliases: []string{
-						{{- range .Aliases }}
-							"{{ . }}",
-						{{- end }}
-					},
-				{{- end }}
-				Short: "{{ .Short }}",
-				Long: cli.Markdown("{{ .Long }}"),
-				{{- if .Hidden }}
-					Hidden: {{ .Hidden }},
-				{{- end }}
-				Example: examples,
-				Args: cobra.MinimumNArgs({{ len .RequiredParams }}),
-				Run: func(cmd *cobra.Command, args []string) {
-					{{- if .CanHaveBody }}
-					body, err := cli.GetBody("{{ .MediaType }}", args[{{ len .RequiredParams}}:])
-					if err != nil {
-						log.Fatal().Err(err).Msg("Unable to get body")
-					}
-					{{- end }}
-
-					{{ if .NeedsResponse }}resp{{ else }}_{{ end }}, decoded, err := {{ $apiPublic }}{{ .GoName }}({{ range $x, $param := .RequiredParams }}args[{{ $x }}], {{ end }}params{{ if .CanHaveBody }}, body{{ end }})
-					if err != nil {
-						log.Fatal().Err(err).Msg("Error calling operation")
-					}
-
-					if err := cli.Formatter.Format(decoded); err != nil {
-						log.Fatal().Err(err).Msg("Formatting failed")
-					}
-
-					{{ if .Waiters }}
-						reqParams := params.AllSettings()
-
-						{{ range $i, $param := $operation.RequiredParams }}
-							reqParams["{{ $param.Name }}"] = args[{{ $i }}]
-						{{ end }}
-
-						var actual interface{}
-					{{- end }}
-
-					{{- range .Waiters }}
-						if params.GetBool("wait-{{ .Waiter.CLIName }}") {
-							wparams := viper.New()
-
-							{{- range $x, $selector := .Args }}
-								actual, err = cli.GetMatchValue(resp.Context, "{{ $selector }}", reqParams, decoded)
-								if err != nil {
-									log.Fatal().Err(err).Msg("Could not get matcher value")
-								}
-
-								arg{{ $x }} := fmt.Sprintf("%v", actual)
-							{{- end }}
-
-							{{- range $id, $selector := .Params }}
-								actual, err = cli.GetMatchValue(resp.Context, "{{ $selector }}", reqParams, decoded)
-								if err != nil {
-									log.Fatal().Err(err).Msg("Could not get matcher value")
-								}
-
-								wparams.Set("{{ $id }}", actual)
-							{{- end }}
-
-							if err := {{ $apiPublic }}{{ .Waiter.GoName }}({{ range $x, $selector := .Args }}arg{{ $x }}, {{ end }}wparams); err != nil {
-								log.Fatal().Err(err).Msg("Waiter error")
-							}
-						}
-					{{- end }}
-				},
+			groupCmd := &cobra.Command{
+				Use: "{{ $group.Name }}",
+				Short: "{{ $group.Short }}",
 			}
-			root.AddCommand(cmd)
+			root.AddCommand(groupCmd)
 
-			{{ template "params" . }}
+			{{ range $operation := $group.Operations }}
+				func () {
+					params := viper.New()
+
+					var examples string
+
+					{{ range $ex := .Examples }}
+						examples += "  " + cli.Root.CommandPath() + " {{ $group.Name }} {{ $operation.Use }} {{ $ex }}\n"
+					{{ end }}
+
+					cmd := &cobra.Command{
+						Use: "{{ .Use }}",
+						{{- if .Aliases }}
+							Aliases: []string{
+								{{- range .Aliases }}
+									"{{ . }}",
+								{{- end }}
+							},
+						{{- end }}
+						Short: "{{ .Short }}",
+						Long: cli.Markdown("{{ .Long }}"),
+						{{- if .Hidden }}
+							Hidden: {{ .Hidden }},
+						{{- end }}
+						Example: examples,
+						Args: cobra.MinimumNArgs({{ len .RequiredParams }}),
+						Run: func(cmd *cobra.Command, args []string) {
+							{{- if .CanHaveBody }}
+							body, err := cli.GetBody("{{ .MediaType }}", args[{{ len .RequiredParams}}:])
+							if err != nil {
+								log.Fatal().Err(err).Msg("Unable to get body")
+							}
+							{{- end }}
+
+							{{ if .NeedsResponse }}resp{{ else }}_{{ end }}, decoded, err := {{ $apiPublic }}{{ .GoName }}({{ range $x, $param := .RequiredParams }}args[{{ $x }}], {{ end }}params{{ if .CanHaveBody }}, body{{ end }})
+							if err != nil {
+								log.Fatal().Err(err).Msg("Error calling operation")
+							}
+
+							if err := cli.Formatter.Format(decoded); err != nil {
+								log.Fatal().Err(err).Msg("Formatting failed")
+							}
+
+							{{ if .Waiters }}
+								reqParams := params.AllSettings()
+
+								{{ range $i, $param := $operation.RequiredParams }}
+									reqParams["{{ $param.Name }}"] = args[{{ $i }}]
+								{{ end }}
+
+								var actual interface{}
+							{{- end }}
+
+							{{- range .Waiters }}
+								if params.GetBool("wait-{{ .Waiter.CLIName }}") {
+									wparams := viper.New()
+
+									{{- range $x, $selector := .Args }}
+										actual, err = cli.GetMatchValue(resp.Context, "{{ $selector }}", reqParams, decoded)
+										if err != nil {
+											log.Fatal().Err(err).Msg("Could not get matcher value")
+										}
+
+										arg{{ $x }} := fmt.Sprintf("%v", actual)
+									{{- end }}
+
+									{{- range $id, $selector := .Params }}
+										actual, err = cli.GetMatchValue(resp.Context, "{{ $selector }}", reqParams, decoded)
+										if err != nil {
+											log.Fatal().Err(err).Msg("Could not get matcher value")
+										}
+
+										wparams.Set("{{ $id }}", actual)
+									{{- end }}
+
+									if err := {{ $apiPublic }}{{ .Waiter.GoName }}({{ range $x, $selector := .Args }}arg{{ $x }}, {{ end }}wparams); err != nil {
+										log.Fatal().Err(err).Msg("Waiter error")
+									}
+								}
+							{{- end }}
+						},
+					}
+					groupCmd.AddCommand(cmd)
+
+					{{ template "params" . }}
+				}()
+			{{ end }}
 		}()
 	{{ end }}
 }

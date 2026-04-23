@@ -2,3 +2,5 @@ vendor
 .vscode
 test
 example-cli/main.go-e
+openapi-cli-generator
+wallfacer

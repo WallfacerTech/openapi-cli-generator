@@ -14,7 +14,7 @@ import (
 
 	"context"
 
-	"github.com/danielgtaylor/openapi-cli-generator/cli"
+	"github.com/WallfacerTech/openapi-cli-generator/cli"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/viper"

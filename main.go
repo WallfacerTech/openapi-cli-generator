@@ -214,6 +214,10 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			if short == "" {
 				short = name
 			}
+			// Spec summaries may span multiple lines and contain quotes. This
+			// value is emitted into both a Go doc comment and Go string
+			// literals, so collapse it to a single line and escape it.
+			short = escapeString(strings.Join(strings.Fields(short), " "))
 
 			use := usage(name, requiredParams)
 
@@ -659,7 +663,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 				Name:        p.Value.Name,
 				CLIName:     cliName,
 				GoName:      toGoName("param "+cliName, false),
-				Description: description,
+				Description: escapeString(description),
 				In:          p.Value.In,
 				Required:    p.Value.Required,
 				Type:        t,

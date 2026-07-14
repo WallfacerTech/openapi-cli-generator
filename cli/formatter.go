@@ -76,6 +76,12 @@ func (f *DefaultFormatter) Format(data interface{}) error {
 		data = result
 	}
 
+	// A query (or an empty result) can reduce data to nil; reflect.TypeOf(nil)
+	// returns nil and calling Kind() on it panics, so short-circuit here.
+	if data == nil {
+		return nil
+	}
+
 	// Encode to the requested output format using nice formatting.
 	var encoded []byte
 	var err error

@@ -190,7 +190,19 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			json.Unmarshal(item.Extensions[ExtHidden].(json.RawMessage), &pathHidden)
 		}
 
-		for method, operation := range item.Operations() {
+		// Operations() returns a map, so iterate it in sorted method order.
+		// Otherwise the generated file's operation order changes on every run
+		// and a regeneration with no spec change still produces a large diff.
+		operations := item.Operations()
+		var methods []string
+		for method := range operations {
+			methods = append(methods, method)
+		}
+		sort.Strings(methods)
+
+		for _, method := range methods {
+			operation := operations[method]
+
 			if operation.Extensions[ExtIgnore] != nil {
 				// Ignore this operation.
 				continue
@@ -352,7 +364,17 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			panic(err)
 		}
 
-		for name, waiter := range waiters {
+		// Sorted for the same reason as the operations above: map order would
+		// otherwise reshuffle the generated waiters on every run.
+		var waiterNames []string
+		for name := range waiters {
+			waiterNames = append(waiterNames, name)
+		}
+		sort.Strings(waiterNames)
+
+		for _, name := range waiterNames {
+			waiter := waiters[name]
+
 			waiter.CLIName = slug(name)
 			waiter.GoName = toGoName(name+"-waiter", true)
 			waiter.Operation = operationMap[waiter.OperationID]

@@ -345,6 +345,51 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 		}
 	}
 
+	// Ensure operation Go names are unique. A spec may assign the same
+	// operationId to two distinct operations (for example an endpoint and a
+	// documented alias that share a summary, from which the operationId is
+	// derived). That is invalid OpenAPI, but rather than emit two Go functions
+	// with the same name (which will not compile) we disambiguate here.
+	// Duplicates are resolved deterministically: operations are ordered by
+	// (GoName, Path, Method), the first keeps the base name, and each later
+	// collision gets the lowest integer suffix not already taken by another
+	// operation's name. HandlerName is suffixed in lockstep so before/after
+	// hooks stay distinct.
+	nameCounts := map[string]int{}
+	for _, op := range result.Operations {
+		nameCounts[op.GoName]++
+	}
+	ordered := make([]*Operation, len(result.Operations))
+	copy(ordered, result.Operations)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].GoName != ordered[j].GoName {
+			return ordered[i].GoName < ordered[j].GoName
+		}
+		if ordered[i].Path != ordered[j].Path {
+			return ordered[i].Path < ordered[j].Path
+		}
+		return ordered[i].Method < ordered[j].Method
+	})
+	usedNames := map[string]bool{}
+	for _, op := range ordered {
+		if !usedNames[op.GoName] {
+			usedNames[op.GoName] = true
+			continue
+		}
+		base := op.GoName
+		for i := 2; ; i++ {
+			cand := base + strconv.Itoa(i)
+			// Avoid names already assigned and names that legitimately belong
+			// to some other operation.
+			if !usedNames[cand] && nameCounts[cand] == 0 {
+				op.GoName = cand
+				op.HandlerName = op.HandlerName + strconv.Itoa(i)
+				usedNames[cand] = true
+				break
+			}
+		}
+	}
+
 	if api.Extensions[ExtWaiters] != nil {
 		var waiters map[string]*Waiter
 

@@ -169,6 +169,14 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
 
+	// Track the Go identifiers we have emitted so far. A spec may reuse the
+	// same operationId across paths (e.g. an alias route that shares its
+	// summary-derived operationId with the canonical route), which would
+	// otherwise emit two Go functions with the same name. Suffix collisions
+	// with a stable numeric index; paths are iterated in sorted order, so the
+	// assignment is deterministic across regenerations.
+	usedGoNames := make(map[string]bool)
+
 	var keys []string
 	for path := range api.Paths {
 		keys = append(keys, path)
@@ -307,9 +315,16 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 
 			use = actionUsage(actionName, requiredParams)
 
+			goName := toGoName(name, true)
+			baseGoName := goName
+			for i := 2; usedGoNames[goName]; i++ {
+				goName = baseGoName + strconv.Itoa(i)
+			}
+			usedGoNames[goName] = true
+
 			o := &Operation{
 				HandlerName:    slug(name),
-				GoName:         toGoName(name, true),
+				GoName:         goName,
 				Use:            use,
 				Aliases:        aliases,
 				Short:          short,

@@ -7,6 +7,7 @@ A fork of [danielgtaylor/openapi-cli-generator](https://github.com/danielgtaylor
 - **Resource grouping** -- commands are organized into subcommand groups based on URL path structure instead of a flat list (e.g. `my-cli items list` instead of `my-cli list-items`)
 - **`x-cli-group` / `x-cli-name` extensions** -- override the auto-derived group or action name per-operation
 - **Action name derivation** from HTTP method + path pattern (`GET /resources` → `list`, `POST /resources/{id}/action` → `action`)
+- **Singleton resources** -- a segment with no `/{id}` of its own that sits directly under a top-level collection's instance still gets its own group (`GET /accounts/{account_id}/handbook` → `my-cli handbook get`), with its action taken from the HTTP method so two methods on one path do not collide
 
 ## Usage
 

@@ -175,7 +175,7 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 	}
 	sort.Strings(keys)
 
-	collectionResources, multiParentResources := precomputeResources(keys)
+	collectionResources, multiParentResources, singletonResources := precomputeResources(keys)
 
 	for _, path := range keys {
 		item := api.Paths[path]
@@ -297,7 +297,7 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 				}
 			}
 
-			group, actionName := deriveGroupAndAction(path, strings.ToUpper(method), collectionResources, multiParentResources)
+			group, actionName := deriveGroupAndAction(path, strings.ToUpper(method), collectionResources, multiParentResources, singletonResources)
 			if operation.Extensions[ExtGroup] != nil {
 				group = extStr(operation.Extensions[ExtGroup])
 			}
@@ -479,8 +479,9 @@ func cleanPathParts(urlPath string) []string {
 }
 
 // precomputeResources analyzes all API paths to determine which segments are
-// collection resources and which appear under multiple parents.
-func precomputeResources(paths []string) (collectionResources, multiParentResources map[string]bool) {
+// collection resources, which appear under multiple parents, and which are
+// singleton resources.
+func precomputeResources(paths []string) (collectionResources, multiParentResources, singletonResources map[string]bool) {
 	collectionResources = map[string]bool{}
 	parentMap := map[string]map[string]bool{}
 
@@ -511,18 +512,81 @@ func precomputeResources(paths []string) (collectionResources, multiParentResour
 			multiParentResources[res] = true
 		}
 	}
+
+	// Singleton resources: a segment that is never followed by a `{param}`
+	// anywhere in the spec (so it is not a collection) but that hangs directly
+	// off a top-level collection's instance, e.g. `handbook` in
+	// `/accounts/{account_id}/handbook`. Without this it would never qualify as
+	// a group, so its operations would land under `accounts` with the resource
+	// noun as their action name -- unreachable as `handbook` and colliding with
+	// each other across HTTP methods.
+	//
+	// The rule is deliberately limited to the segment right below a top-level
+	// collection instance. Singletons nested deeper (`/vms/{vm_id}/commands`)
+	// keep reading as an action on their parent resource, which is how they are
+	// invoked anyway, since the parent's ID is a required argument.
+	//
+	// The set is keyed by `<parent>/<segment>`, and a name that appears as a
+	// singleton under more than one top-level parent is dropped from it
+	// entirely. Promoting such a name would put `GET /accounts/{id}/audit` and
+	// `GET /organizations/{id}/audit` at the same `audit get` command, which is
+	// the same shadowing this rule exists to prevent. Dropping it falls the
+	// operations back to their parent groups (`accounts audit`,
+	// `organizations audit`), mirroring how multiParentResources handles the
+	// collection case.
+	singletonParents := map[string]map[string]bool{}
+	for _, p := range paths {
+		parts := cleanPathParts(p)
+		if !isSingletonPosition(parts, 2) || !collectionResources[parts[0]] {
+			continue
+		}
+		if collectionResources[parts[2]] {
+			continue
+		}
+		if singletonParents[parts[2]] == nil {
+			singletonParents[parts[2]] = map[string]bool{}
+		}
+		singletonParents[parts[2]][parts[0]] = true
+	}
+
+	singletonResources = map[string]bool{}
+	for res, parents := range singletonParents {
+		if len(parents) > 1 {
+			continue
+		}
+		for parent := range parents {
+			singletonResources[singletonKey(parent, res)] = true
+		}
+	}
 	return
 }
 
-func deriveGroupAndAction(urlPath, httpMethod string, collectionResources, multiParentResources map[string]bool) (group, action string) {
+// singletonKey names a singleton resource by the top-level collection it hangs
+// off, so the same singleton noun under two different parents stays distinct.
+func singletonKey(parent, segment string) string {
+	return parent + "/" + segment
+}
+
+// isSingletonPosition reports whether parts[i] sits directly under a top-level
+// collection's instance, e.g. `handbook` in `/accounts/{account_id}/handbook`.
+// That position is what makes a non-collection segment a resource in its own
+// right rather than an action on its parent.
+func isSingletonPosition(parts []string, i int) bool {
+	return i == 2 && len(parts) > 2 &&
+		!isPathParam(parts[0]) && isPathParam(parts[1]) && !isPathParam(parts[2])
+}
+
+func deriveGroupAndAction(urlPath, httpMethod string, collectionResources, multiParentResources, singletonResources map[string]bool) (group, action string) {
 	parts := cleanPathParts(urlPath)
 
 	if len(parts) == 0 {
 		return "api", methodToAction(httpMethod, false)
 	}
 
-	// Find the deepest qualifying collection resource (not multi-parent)
+	// Find the deepest qualifying resource: a collection (not multi-parent) or a
+	// singleton.
 	groupIdx := -1
+	singletonGroup := false
 	for i := 0; i < len(parts); i++ {
 		seg := parts[i]
 		if isPathParam(seg) {
@@ -531,6 +595,11 @@ func deriveGroupAndAction(urlPath, httpMethod string, collectionResources, multi
 		if collectionResources[seg] && !multiParentResources[seg] {
 			groupIdx = i
 			group = seg
+			singletonGroup = false
+		} else if isSingletonPosition(parts, i) && singletonResources[singletonKey(parts[0], seg)] {
+			groupIdx = i
+			group = seg
+			singletonGroup = true
 		}
 	}
 
@@ -560,7 +629,12 @@ func deriveGroupAndAction(urlPath, httpMethod string, collectionResources, multi
 			action = depluralize(actionParts[0])
 		}
 	} else {
-		action = methodToAction(httpMethod, lastIsParam)
+		// A singular singleton (`handbook`) is one object, so GET is `get`. A
+		// plural one (`connections`) reads as a collection, so GET is `list`.
+		// Either way the action comes from the HTTP method, which is what keeps
+		// GET and PATCH on the same path from colliding.
+		singleResource := lastIsParam || (singletonGroup && !isPlural(group))
+		action = methodToAction(httpMethod, singleResource)
 	}
 
 	return
@@ -581,6 +655,11 @@ func methodToAction(method string, singleResource bool) string {
 		return "delete"
 	}
 	return strings.ToLower(method)
+}
+
+// isPlural reports whether s looks like a plural noun.
+func isPlural(s string) bool {
+	return depluralize(s) != s
 }
 
 func depluralize(s string) string {

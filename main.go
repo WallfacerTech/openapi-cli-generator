@@ -169,6 +169,10 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
 
+	// How many operations have already claimed a given name, so duplicates
+	// can be given a unique suffix. See the dedupe below.
+	usedNames := make(map[string]int)
+
 	var keys []string
 	for path := range api.Paths {
 		keys = append(keys, path)
@@ -199,6 +203,15 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			name := operation.OperationID
 			if operation.Extensions[ExtName] != nil {
 				name = extStr(operation.Extensions[ExtName])
+			}
+
+			// Two operations can share an operationId: generators that derive
+			// it from the summary give an endpoint and its documented alias the
+			// same one. The name becomes a Go identifier and a handler path, so
+			// suffix repeats to keep the generated code compiling.
+			usedNames[name]++
+			if n := usedNames[name]; n > 1 {
+				name = fmt.Sprintf("%s%d", name, n)
 			}
 
 			var aliases []string

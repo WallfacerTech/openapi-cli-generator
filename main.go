@@ -525,7 +525,16 @@ func precomputeResources(paths []string) (collectionResources, multiParentResour
 	// collection instance. Singletons nested deeper (`/vms/{vm_id}/commands`)
 	// keep reading as an action on their parent resource, which is how they are
 	// invoked anyway, since the parent's ID is a required argument.
-	singletonResources = map[string]bool{}
+	//
+	// The set is keyed by `<parent>/<segment>`, and a name that appears as a
+	// singleton under more than one top-level parent is dropped from it
+	// entirely. Promoting such a name would put `GET /accounts/{id}/audit` and
+	// `GET /organizations/{id}/audit` at the same `audit get` command, which is
+	// the same shadowing this rule exists to prevent. Dropping it falls the
+	// operations back to their parent groups (`accounts audit`,
+	// `organizations audit`), mirroring how multiParentResources handles the
+	// collection case.
+	singletonParents := map[string]map[string]bool{}
 	for _, p := range paths {
 		parts := cleanPathParts(p)
 		if !isSingletonPosition(parts, 2) || !collectionResources[parts[0]] {
@@ -534,9 +543,28 @@ func precomputeResources(paths []string) (collectionResources, multiParentResour
 		if collectionResources[parts[2]] {
 			continue
 		}
-		singletonResources[parts[2]] = true
+		if singletonParents[parts[2]] == nil {
+			singletonParents[parts[2]] = map[string]bool{}
+		}
+		singletonParents[parts[2]][parts[0]] = true
+	}
+
+	singletonResources = map[string]bool{}
+	for res, parents := range singletonParents {
+		if len(parents) > 1 {
+			continue
+		}
+		for parent := range parents {
+			singletonResources[singletonKey(parent, res)] = true
+		}
 	}
 	return
+}
+
+// singletonKey names a singleton resource by the top-level collection it hangs
+// off, so the same singleton noun under two different parents stays distinct.
+func singletonKey(parent, segment string) string {
+	return parent + "/" + segment
 }
 
 // isSingletonPosition reports whether parts[i] sits directly under a top-level
@@ -568,7 +596,7 @@ func deriveGroupAndAction(urlPath, httpMethod string, collectionResources, multi
 			groupIdx = i
 			group = seg
 			singletonGroup = false
-		} else if singletonResources[seg] && isSingletonPosition(parts, i) {
+		} else if isSingletonPosition(parts, i) && singletonResources[singletonKey(parts[0], seg)] {
 			groupIdx = i
 			group = seg
 			singletonGroup = true

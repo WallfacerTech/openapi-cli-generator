@@ -47,17 +47,59 @@ func TestPrecomputeResources(t *testing.T) {
 	}
 
 	for _, seg := range []string{"handbook", "search", "audit", "connections"} {
-		if !singletons[seg] {
-			t.Errorf("expected %q to be a singleton resource", seg)
+		if !singletons[singletonKey("accounts", seg)] {
+			t.Errorf("expected %q to be a singleton resource under accounts", seg)
 		}
 	}
 	// Nested singletons stay actions on their parent resource.
-	if singletons["commands"] {
+	if singletons[singletonKey("accounts", "commands")] {
 		t.Error("expected commands not to be a singleton resource")
 	}
 	// Sub-paths of a singleton are actions on it, not groups of their own.
-	if singletons["policy"] {
+	if singletons[singletonKey("accounts", "policy")] {
 		t.Error("expected policy not to be a singleton resource")
+	}
+}
+
+// A singleton noun that hangs off two different top-level collections cannot be
+// promoted to a group: both parents' operations would land on the same
+// `<noun> get` command and cobra would keep only one. Such a name falls back to
+// its parent group, the same way a multi-parent collection does.
+func TestSingletonNameUnderMultipleParents(t *testing.T) {
+	paths := []string{
+		"/v1/accounts",
+		"/v1/accounts/{account_id}",
+		"/v1/accounts/{account_id}/audit",
+		"/v1/accounts/{account_id}/handbook",
+		"/v1/organizations",
+		"/v1/organizations/{organization_id}",
+		"/v1/organizations/{organization_id}/audit",
+	}
+	collections, multiParent, singletons := precomputeResources(paths)
+
+	if singletons[singletonKey("accounts", "audit")] || singletons[singletonKey("organizations", "audit")] {
+		t.Error("expected audit not to be a singleton resource under either parent")
+	}
+	// A name with a single parent is still promoted.
+	if !singletons[singletonKey("accounts", "handbook")] {
+		t.Error("expected handbook to remain a singleton resource")
+	}
+
+	cases := []struct {
+		path   string
+		method string
+		group  string
+		action string
+	}{
+		{"/v1/accounts/{account_id}/audit", "GET", "accounts", "audit"},
+		{"/v1/organizations/{organization_id}/audit", "GET", "organizations", "audit"},
+		{"/v1/accounts/{account_id}/handbook", "GET", "handbook", "get"},
+	}
+	for _, c := range cases {
+		group, action := deriveGroupAndAction(c.path, c.method, collections, multiParent, singletons)
+		if group != c.group || action != c.action {
+			t.Errorf("%s %s: got %q %q, want %q %q", c.method, c.path, group, action, c.group, c.action)
+		}
 	}
 }
 

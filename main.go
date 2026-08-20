@@ -169,6 +169,12 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
 
+	// How many operations have already claimed each generated Go name. Two
+	// operations can share an operationId (Scribe derives ids from summaries,
+	// so an endpoint and its alias land on the same one); the later ones get a
+	// numeric suffix so the generated identifiers stay unique.
+	usedGoNames := make(map[string]int)
+
 	var keys []string
 	for path := range api.Paths {
 		keys = append(keys, path)
@@ -190,7 +196,19 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			json.Unmarshal(item.Extensions[ExtHidden].(json.RawMessage), &pathHidden)
 		}
 
-		for method, operation := range item.Operations() {
+		// Operations() is a map, so iterate it in a fixed order. Otherwise the
+		// generated file reorders itself on every run and real spec changes are
+		// impossible to spot in the diff.
+		operations := item.Operations()
+		var methods []string
+		for m := range operations {
+			methods = append(methods, m)
+		}
+		sort.Strings(methods)
+
+		for _, method := range methods {
+			operation := operations[method]
+
 			if operation.Extensions[ExtIgnore] != nil {
 				// Ignore this operation.
 				continue
@@ -307,9 +325,20 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 
 			use = actionUsage(actionName, requiredParams)
 
+			goName := toGoName(name, true)
+			handlerName := slug(name)
+			if claimed := usedGoNames[goName]; claimed > 0 {
+				usedGoNames[goName] = claimed + 1
+				suffix := strconv.Itoa(claimed + 1)
+				goName += suffix
+				handlerName += suffix
+			} else {
+				usedGoNames[goName] = 1
+			}
+
 			o := &Operation{
-				HandlerName:    slug(name),
-				GoName:         toGoName(name, true),
+				HandlerName:    handlerName,
+				GoName:         goName,
 				Use:            use,
 				Aliases:        aliases,
 				Short:          short,

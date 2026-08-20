@@ -169,6 +169,12 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
 
+	// Counts how many times each operation name has been emitted. A spec may
+	// reuse one operationId across several paths (aliased routes share the
+	// generated ID), and every name becomes a Go identifier, so repeats get a
+	// numeric suffix: `foo`, `foo2`, `foo3`.
+	nameCounts := make(map[string]int)
+
 	var keys []string
 	for path := range api.Paths {
 		keys = append(keys, path)
@@ -190,7 +196,17 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			json.Unmarshal(item.Extensions[ExtHidden].(json.RawMessage), &pathHidden)
 		}
 
-		for method, operation := range item.Operations() {
+		// Operations() returns a map, so iterate it in a fixed order to keep
+		// the generated file stable across runs.
+		operations := item.Operations()
+		var methods []string
+		for method := range operations {
+			methods = append(methods, method)
+		}
+		sort.Strings(methods)
+
+		for _, method := range methods {
+			operation := operations[method]
 			if operation.Extensions[ExtIgnore] != nil {
 				// Ignore this operation.
 				continue
@@ -199,6 +215,17 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			name := operation.OperationID
 			if operation.Extensions[ExtName] != nil {
 				name = extStr(operation.Extensions[ExtName])
+			}
+
+			nameCounts[name]++
+			if nameCounts[name] > 1 {
+				candidate := fmt.Sprintf("%s%d", name, nameCounts[name])
+				for nameCounts[candidate] > 0 {
+					nameCounts[name]++
+					candidate = fmt.Sprintf("%s%d", name, nameCounts[name])
+				}
+				nameCounts[candidate]++
+				name = candidate
 			}
 
 			var aliases []string

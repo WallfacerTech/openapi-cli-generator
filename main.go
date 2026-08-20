@@ -169,6 +169,10 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
 
+	// Go names already handed out, so a spec that reuses an operation ID does
+	// not generate two functions with the same name.
+	usedGoNames := make(map[string]bool)
+
 	var keys []string
 	for path := range api.Paths {
 		keys = append(keys, path)
@@ -306,6 +310,12 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			}
 
 			use = actionUsage(actionName, requiredParams)
+
+			// Two operations can carry the same operation ID: Scribe derives it
+			// from the summary, so a pair of routes documented in one docblock
+			// share it. Go names have to be unique or the generated file does
+			// not compile, so the later one falls back to method and path.
+			name = uniqueOperationName(name, path, method, usedGoNames)
 
 			o := &Operation{
 				HandlerName:    slug(name),
@@ -458,6 +468,44 @@ func toGoName(input string, public bool) string {
 	}
 
 	return transformed
+}
+
+// uniqueOperationName returns a name no other operation has taken, deriving a
+// fallback from the HTTP method and URL path when the spec reuses a name.
+func uniqueOperationName(name, urlPath, httpMethod string, used map[string]bool) string {
+	if goName := toGoName(name, true); goName != "" && !used[goName] {
+		used[goName] = true
+		return name
+	}
+
+	base := name + "-" + httpMethod + "-" + nameSafe(urlPath)
+	candidate := base
+	for i := 2; used[toGoName(candidate, true)]; i++ {
+		candidate = base + "-" + strconv.Itoa(i)
+	}
+
+	used[toGoName(candidate, true)] = true
+	return candidate
+}
+
+// nameSafe reduces a string to characters that survive toGoName, collapsing
+// everything else (path separators, braces, dots) into a single dash.
+func nameSafe(value string) string {
+	var b strings.Builder
+	lastDash := true
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteRune('-')
+			lastDash = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-")
 }
 
 func escapeString(value string) string {

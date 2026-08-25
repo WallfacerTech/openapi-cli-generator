@@ -169,6 +169,11 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
 
+	// Go names already taken by an operation. Operation IDs are not unique
+	// across paths in every spec, and the name is emitted as a package-level
+	// func, so repeats have to be qualified.
+	usedGoNames := make(map[string]bool)
+
 	var keys []string
 	for path := range api.Paths {
 		keys = append(keys, path)
@@ -190,7 +195,20 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			json.Unmarshal(item.Extensions[ExtHidden].(json.RawMessage), &pathHidden)
 		}
 
-		for method, operation := range item.Operations() {
+		// Operations come back in a map, so walk them in a fixed order:
+		// otherwise the generated file, and which of two operations sharing a
+		// name gets qualified, changes from run to run.
+		operations := item.Operations()
+
+		var methods []string
+		for method := range operations {
+			methods = append(methods, method)
+		}
+		sort.Strings(methods)
+
+		for _, method := range methods {
+			operation := operations[method]
+
 			if operation.Extensions[ExtIgnore] != nil {
 				// Ignore this operation.
 				continue
@@ -307,9 +325,11 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 
 			use = actionUsage(actionName, requiredParams)
 
+			goName, handlerName := uniqueNames(name, group, usedGoNames)
+
 			o := &Operation{
-				HandlerName:    slug(name),
-				GoName:         toGoName(name, true),
+				HandlerName:    handlerName,
+				GoName:         goName,
 				Use:            use,
 				Aliases:        aliases,
 				Short:          short,
@@ -594,6 +614,30 @@ func depluralize(s string) string {
 		return s[:len(s)-1]
 	}
 	return s
+}
+
+// uniqueNames returns the Go function name and handler path for an operation,
+// qualifying both when another operation has already taken them. Two paths can
+// carry the same operation ID (an alias route, or a collection that exists at
+// more than one level), and the generated code would not compile if the name
+// were emitted twice. The first operation to claim a name keeps it; later ones
+// are qualified with the path-derived group, then with a counter. Paths are
+// walked in sorted order, so which operation keeps the plain name is stable
+// across runs. used is updated with the name returned.
+func uniqueNames(name, group string, used map[string]bool) (string, string) {
+	candidate := name
+
+	if used[toGoName(candidate, true)] && group != "" {
+		candidate = group + "-" + name
+	}
+
+	for i := 2; used[toGoName(candidate, true)]; i++ {
+		candidate = name + "-" + strconv.Itoa(i)
+	}
+
+	used[toGoName(candidate, true)] = true
+
+	return toGoName(candidate, true), slug(candidate)
 }
 
 func slug(operationID string) string {

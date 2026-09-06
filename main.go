@@ -182,6 +182,10 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 
 	collectionResources, multiParentResources := precomputeResources(keys)
 
+	// Which operation keeps the plain command name inside each group, for the
+	// groups where two operations derive the same one.
+	actionOwners := precomputeActionOwners(keys, api, collectionResources, multiParentResources)
+
 	for _, path := range keys {
 		item := api.Paths[path]
 
@@ -315,13 +319,8 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 				}
 			}
 
-			group, actionName := deriveGroupAndAction(path, strings.ToUpper(method), collectionResources, multiParentResources)
-			if operation.Extensions[ExtGroup] != nil {
-				group = extStr(operation.Extensions[ExtGroup])
-			}
-			if operation.Extensions[ExtName] != nil {
-				actionName = extStr(operation.Extensions[ExtName])
-			}
+			group, actionName := groupAndAction(operation, path, strings.ToUpper(method), collectionResources, multiParentResources)
+			actionName = uniqueAction(path, strings.ToUpper(method), group, actionName, actionOwners)
 
 			use = actionUsage(actionName, requiredParams)
 
@@ -584,6 +583,122 @@ func deriveGroupAndAction(urlPath, httpMethod string, collectionResources, multi
 	}
 
 	return
+}
+
+// groupAndAction returns the command group and action name for an operation,
+// honoring the x-cli-group and x-cli-name extensions over what the path
+// derives.
+func groupAndAction(operation *openapi3.Operation, path, httpMethod string, collectionResources, multiParentResources map[string]bool) (string, string) {
+	group, action := deriveGroupAndAction(path, httpMethod, collectionResources, multiParentResources)
+
+	if operation.Extensions[ExtGroup] != nil {
+		group = extStr(operation.Extensions[ExtGroup])
+	}
+	if operation.Extensions[ExtName] != nil {
+		action = extStr(operation.Extensions[ExtName])
+	}
+
+	return group, action
+}
+
+// actionOwner is the operation that keeps a group's plain command name.
+type actionOwner struct {
+	path   string
+	method string
+	depth  int
+}
+
+// precomputeActionOwners decides, for every group and action name two or more
+// operations derive, which operation keeps the plain name. Cobra resolves a
+// duplicate command name to whichever command was registered first, so without
+// this the canonical route can silently lose its command to a nested one that
+// happens to sort earlier: `POST /accounts/{id}/onboardings/{onboarding}/tasks`
+// and `POST /accounts/{id}/tasks` both derive `tasks create`. The shallowest
+// path wins, ties going to the first path and method in sorted order, so the
+// choice is stable across runs.
+func precomputeActionOwners(keys []string, api *openapi3.Swagger, collectionResources, multiParentResources map[string]bool) map[string]actionOwner {
+	owners := map[string]actionOwner{}
+
+	for _, path := range keys {
+		item := api.Paths[path]
+
+		if item.Extensions[ExtIgnore] != nil {
+			continue
+		}
+
+		operations := item.Operations()
+
+		var methods []string
+		for method := range operations {
+			methods = append(methods, method)
+		}
+		sort.Strings(methods)
+
+		for _, method := range methods {
+			operation := operations[method]
+
+			if operation.Extensions[ExtIgnore] != nil {
+				continue
+			}
+
+			group, action := groupAndAction(operation, path, strings.ToUpper(method), collectionResources, multiParentResources)
+			candidate := actionOwner{path: path, method: strings.ToUpper(method), depth: len(cleanPathParts(path))}
+
+			if current, seen := owners[group+"\x00"+action]; !seen || candidate.depth < current.depth {
+				owners[group+"\x00"+action] = candidate
+			}
+		}
+	}
+
+	return owners
+}
+
+// uniqueAction returns the command name this operation may use inside its
+// group: the plain action for the operation that owns it, and a qualified one
+// for the rest. The qualifier is the HTTP method's own verb where that differs
+// from the action (`update-current` for a PUT beside a GET on the same path),
+// otherwise the resource the path nests under (`onboarding-create`), and a
+// counter if neither is available.
+func uniqueAction(path, httpMethod, group, action string, owners map[string]actionOwner) string {
+	owner, ok := owners[group+"\x00"+action]
+	if !ok || (owner.path == path && owner.method == httpMethod) {
+		return action
+	}
+
+	parts := cleanPathParts(path)
+	lastIsParam := len(parts) > 0 && isPathParam(parts[len(parts)-1])
+
+	if verb := methodToAction(httpMethod, lastIsParam); verb != action {
+		return verb + "-" + action
+	}
+
+	if parent := parentResource(parts, group); parent != "" {
+		return depluralize(parent) + "-" + action
+	}
+
+	return action + "-" + httpMethodSuffix(httpMethod)
+}
+
+// parentResource returns the non-parameter segment the group's own segment
+// nests under, if there is one.
+func parentResource(parts []string, group string) string {
+	for i := len(parts) - 1; i > 0; i-- {
+		if parts[i] != group {
+			continue
+		}
+
+		for j := i - 1; j >= 0; j-- {
+			if !isPathParam(parts[j]) {
+				return parts[j]
+			}
+		}
+	}
+
+	return ""
+}
+
+func httpMethodSuffix(httpMethod string) string {
+	return strings.ToLower(httpMethod)
 }
 
 func methodToAction(method string, singleResource bool) string {

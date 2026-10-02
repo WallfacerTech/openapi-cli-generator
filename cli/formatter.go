@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -127,7 +128,7 @@ func (f *DefaultFormatter) Format(data interface{}) error {
 
 			lexer = "yaml"
 		} else {
-			encoded, err = json.MarshalIndent(data, "", "  ")
+			encoded, err = marshalIndentJSON(data)
 
 			if err != nil {
 				return err
@@ -153,4 +154,18 @@ func (f *DefaultFormatter) Format(data interface{}) error {
 	}
 
 	return nil
+}
+
+// marshalIndentJSON is json.MarshalIndent without HTML escaping. This output
+// is read by people, agents, and jq, never embedded in HTML, so "R&D" and
+// "<body>" print as written rather than as "R\u0026D" and "\u003cbody\u003e".
+func marshalIndentJSON(data interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(data); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

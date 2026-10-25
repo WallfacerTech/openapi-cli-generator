@@ -210,7 +210,7 @@ func ProcessAPI(shortName string, api *openapi3.Swagger) *OpenAPI {
 			params := getParams(item, method)
 			requiredParams := getRequiredParams(params)
 			optionalParams := getOptionalParams(params)
-			short := operation.Summary
+			short := escapeString(operation.Summary)
 			if short == "" {
 				short = name
 			}
@@ -654,6 +654,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			if p.Value.Extensions[ExtDescription] != nil {
 				description = extStr(p.Value.Extensions[ExtDescription])
 			}
+			description = escapeString(description)
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,
